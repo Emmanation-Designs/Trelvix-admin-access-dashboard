@@ -43,7 +43,30 @@ class AdminApiClient {
       headers['Authorization'] = `Bearer ${token}`;
     }
 
-    const response = await fetch(endpoint, {
+    // 1. Ensure all requests strictly use relative paths starting with /api/admin/
+    // Strip any unresolved external hostnames, localhost:3000, or VITE_API_URL prefixes
+    let relativePath = endpoint;
+    if (relativePath.startsWith('http://') || relativePath.startsWith('https://')) {
+      try {
+        const parsed = new URL(relativePath);
+        relativePath = parsed.pathname + parsed.search;
+      } catch {
+        // fallback to relative if unparseable
+      }
+    }
+
+    if (!relativePath.startsWith('/')) {
+      relativePath = '/' + relativePath;
+    }
+
+    // 3. Log the exact URL being requested before every fetch call
+    const currentOrigin = typeof window !== 'undefined' && window.location?.origin 
+      ? window.location.origin 
+      : 'http://localhost:3000';
+    const targetUrl = new URL(relativePath, currentOrigin).toString();
+    console.log(`[AdminAPI] Requesting URL: ${targetUrl} (relative: ${relativePath})`);
+
+    const response = await fetch(relativePath, {
       credentials: 'include',
       ...options,
       headers,
@@ -65,6 +88,26 @@ class AdminApiClient {
     }
 
     return response.json();
+  }
+
+  // Auth: Server-proxied login to eliminate net::ERR_NAME_NOT_RESOLVED from external client endpoints
+  async loginWithPassword(email: string, password: string): Promise<{ 
+    authenticated: boolean; 
+    token: string; 
+    user: any; 
+    is_admin: boolean 
+  }> {
+    return this.request('/api/admin/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({ email, password }),
+    });
+  }
+
+  async loginWithMagicLink(email: string): Promise<{ success: boolean; message: string }> {
+    return this.request('/api/admin/auth/magic-link', {
+      method: 'POST',
+      body: JSON.stringify({ email }),
+    });
   }
 
   // Auth verification

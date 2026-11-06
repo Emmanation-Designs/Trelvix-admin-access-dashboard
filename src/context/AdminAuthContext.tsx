@@ -127,23 +127,32 @@ export const AdminAuthProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setIsAccessDenied(false);
 
     try {
-      if (!supabase) {
-        throw new Error('Supabase client is not configured. Please ensure VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY are set.');
-      }
+      // Primary: Route via relative /api/admin/auth/login to avoid unresolved client-side DNS domains
+      const result = await adminApi.loginWithPassword(email, password);
 
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      if (error) throw error;
-
-      if (data.session) {
-        await verifySession(data.session.access_token);
+      if (result.authenticated && result.token) {
+        setToken(result.token);
+        adminApi.setToken(result.token);
+        setAdminUser({
+          id: result.user?.id,
+          email: result.user?.email,
+          display_name: result.user?.display_name || result.user?.email?.split('@')[0],
+          role: result.user?.role || 'admin',
+          is_admin: true,
+        });
+        setIsAccessDenied(false);
+        setErrorMessage(null);
+        setIsLoading(false);
         return true;
       }
+      setIsLoading(false);
       return false;
     } catch (err: any) {
-      if (err.status === 403) {
+      console.warn('[AdminAuth] Login failed:', err.message);
+      if (err.status === 403 || err.is_admin === false) {
         setIsAccessDenied(true);
       } else {
-        setErrorMessage(err.message || 'Login failed');
+        setErrorMessage(err.message || 'Authentication failed. Please check your admin credentials.');
       }
       setIsLoading(false);
       return false;
@@ -155,26 +164,21 @@ export const AdminAuthProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setErrorMessage(null);
 
     try {
-      if (!supabase) {
-        throw new Error('Supabase client is not configured.');
-      }
-
-      const { error } = await supabase.auth.signInWithOtp({
-        email,
-        options: {
-          emailRedirectTo: window.location.origin,
-        },
-      });
-      if (error) throw error;
+      // Route via relative /api/admin/auth/magic-link
+      const res = await adminApi.loginWithMagicLink(email);
       setIsLoading(false);
-      return { success: true, message: `Magic sign-in link sent to ${email}. Please check your email inbox.` };
+      return res;
     } catch (err: any) {
       setIsLoading(false);
-      return { success: false, message: err.message || 'Failed to dispatch magic link' };
+      return { success: false, message: err.message || 'Failed to dispatch magic link.' };
     }
   };
 
   const logout = () => {
+    setAdminUser(null);
+    setToken(null);
+    adminApi.setToken(null);
+    localStorage.removeItem('trelvix_admin_token');
     if (supabase) {
       supabase.auth.signOut().catch(() => {});
     }

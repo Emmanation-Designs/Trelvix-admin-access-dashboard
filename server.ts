@@ -268,6 +268,111 @@ app.get('/api/admin/auth/verify', async (req: Request, res: Response): Promise<v
   }
 });
 
+// -------------------------------------------------------------
+// AUTH LOGIN ENDPOINTS (Server-side proxy avoids client-side net::ERR_NAME_NOT_RESOLVED)
+// POST /api/admin/auth/login
+// POST /api/admin/auth/magic-link
+// -------------------------------------------------------------
+app.post('/api/admin/auth/login', async (req: Request, res: Response): Promise<void> => {
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    res.status(400).json({ error: 'Email and password are required.' });
+    return;
+  }
+
+  try {
+    const sb = getSupabaseAdmin();
+
+    // Authenticate with Supabase Auth server-side
+    const { data, error: authError } = await sb.auth.signInWithPassword({
+      email,
+      password,
+    });
+
+    if (authError || !data?.session || !data?.user) {
+      res.status(401).json({
+        error: authError?.message || 'Invalid administrative credentials.',
+        code: 'INVALID_CREDENTIALS',
+      });
+      return;
+    }
+
+    // Verify admin role in profiles
+    const { data: profile, error: profileError } = await sb
+      .from('profiles')
+      .select('id, email, is_admin, role, subscription_status')
+      .eq('id', data.user.id)
+      .single();
+
+    if (profileError || !profile || !profile.is_admin || (profile.role !== 'admin' && profile.role !== 'super_admin')) {
+      res.status(403).json({
+        error: 'Access Denied: Administrative privileges required.',
+        code: 'FORBIDDEN_NOT_ADMIN',
+        is_admin: false,
+      });
+      return;
+    }
+
+    // Record login audit event
+    await logAdminAction(
+      data.user.id,
+      profile.email || data.user.email || email,
+      'Admin Logged In',
+      { method: 'password', ip: req.ip || '127.0.0.1' },
+      data.user.id,
+      typeof req.headers['x-forwarded-for'] === 'string' ? req.headers['x-forwarded-for'] : req.ip
+    );
+
+    res.json({
+      authenticated: true,
+      is_admin: true,
+      token: data.session.access_token,
+      user: {
+        id: data.user.id,
+        email: profile.email || data.user.email,
+        display_name: (profile as any)?.display_name || data.user.user_metadata?.full_name || data.user.user_metadata?.name || email.split('@')[0] || 'Admin',
+        role: profile.role,
+      },
+    });
+  } catch (err: any) {
+    console.error('[Admin Auth Login Error]:', err.message);
+    res.status(500).json({
+      error: 'Authentication failed: ' + err.message,
+    });
+  }
+});
+
+app.post('/api/admin/auth/magic-link', async (req: Request, res: Response): Promise<void> => {
+  const { email } = req.body || {};
+  if (!email) {
+    res.status(400).json({ error: 'Email is required.' });
+    return;
+  }
+
+  try {
+    const sb = getSupabaseAdmin();
+    const origin = req.headers.origin || `http://${req.headers.host}`;
+    const { error: otpError } = await sb.auth.signInWithOtp({
+      email,
+      options: {
+        emailRedirectTo: origin,
+      },
+    });
+
+    if (otpError) {
+      res.status(400).json({ error: otpError.message });
+      return;
+    }
+
+    res.json({
+      success: true,
+      message: `Magic link dispatched to ${email}. Please check your inbox.`,
+    });
+  } catch (err: any) {
+    res.status(500).json({ error: 'Failed to send magic link: ' + err.message });
+  }
+});
+
 // Helper function to normalize user profile + user_usage_tracking
 function normalizeUserData(p: any): AdminUser {
   if (!p) p = {};

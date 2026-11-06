@@ -1,0 +1,8 @@
+{
+  "name": "Trelvix AI Enterprise Admin Portal",
+  "description": "High-privilege enterprise administration portal for Trelvix AI, featuring RBAC verification, real-time telemetry, user management, reservation auditing, and dynamic plan controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

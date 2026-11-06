@@ -80,13 +80,32 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: (origin, callback) => {
-    if (!origin || allowedOrigins.includes(origin) || origin.includes('localhost') || origin.includes('127.0.0.1') || origin.includes('run.app')) {
+    // Allow requests with no origin (like mobile apps, curl, or same-origin)
+    if (!origin) {
       return callback(null, true);
     }
-    return callback(new Error('CORS access blocked by enterprise admin policy.'));
+    // Whitelisted enterprise domains
+    if (allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    // Local development and sandbox environments
+    if (
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1') ||
+      origin.includes('run.app')
+    ) {
+      return callback(null, true);
+    }
+    // Reject unknown origins without throwing an error that crashes Express
+    return callback(null, false);
   },
   credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
 }));
+
+// Explicit preflight handling
+app.options('*', cors());
 
 app.use(express.json());
 
@@ -387,7 +406,7 @@ app.get('/api/admin/metrics', requireAdmin, async (req: AuthenticatedRequest, re
       ? Math.round((totalCapacityConsumed / totalAllowancePool) * 100) 
       : 0;
 
-    // 4. Active reservations / renders count
+    // 4. Active reservations / renders count (Defensive 404/error fallback to 0)
     let activeRenders = 0;
     try {
       const { count, error: resErr } = await sb
@@ -397,11 +416,15 @@ app.get('/api/admin/metrics', requireAdmin, async (req: AuthenticatedRequest, re
 
       if (!resErr && typeof count === 'number') {
         activeRenders = count;
-      } else if (resErr) {
-        console.warn('[Metrics] Notice: capacity_reservations table error/empty:', resErr.message);
+      } else {
+        if (resErr) {
+          console.warn('[Metrics] Notice: capacity_reservations table 404/missing, defaulting to 0:', resErr.message || resErr);
+        }
+        activeRenders = 0;
       }
     } catch (e: any) {
-      console.warn('[Metrics] Notice: capacity_reservations catch:', e.message);
+      console.warn('[Metrics] Defensive catch for capacity_reservations table, defaulting to 0:', e.message);
+      activeRenders = 0;
     }
 
     const metrics: DashboardMetrics = {

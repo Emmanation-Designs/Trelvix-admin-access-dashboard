@@ -44,6 +44,7 @@ class AdminApiClient {
     }
 
     const response = await fetch(endpoint, {
+      credentials: 'include',
       ...options,
       headers,
     });

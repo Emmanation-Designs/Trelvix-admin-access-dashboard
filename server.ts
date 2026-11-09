@@ -30,7 +30,7 @@ const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 // -------------------------------------------------------------
 // STRICT SUPABASE SERVICE ROLE CLIENT INITIALIZATION
 // -------------------------------------------------------------
-const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '';
+const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || 'https://wxezfzhhzlauggufecmm.supabase.co';
 const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
 
 let supabaseAdmin: SupabaseClient | null = null;

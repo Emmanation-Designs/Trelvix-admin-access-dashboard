@@ -79,26 +79,12 @@ const allowedOrigins = [
 ];
 
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (like mobile apps, curl, or same-origin)
-    if (!origin) {
-      return callback(null, true);
-    }
-    // Whitelisted enterprise domains
-    if (allowedOrigins.includes(origin)) {
-      return callback(null, true);
-    }
-    // Local development and sandbox environments
-    if (
-      origin.includes('localhost') ||
-      origin.includes('127.0.0.1') ||
-      origin.includes('run.app')
-    ) {
-      return callback(null, true);
-    }
-    // Reject unknown origins without throwing an error that crashes Express
-    return callback(null, false);
-  },
+  origin: [
+    'https://adminaccess.trelvixai.com',
+    'https://trelvixai.com',
+    /^http:\/\/localhost:\d+$/,
+    /\.run\.app$/
+  ],
   credentials: true,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With', 'Accept'],
@@ -1485,9 +1471,10 @@ async function startServer(): Promise<void> {
     });
     app.use(vite.middlewares);
   } else {
-    app.use(express.static(path.join(__dirname, 'dist')));
-    app.get('*', (req, res) => {
-      res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+    app.use(express.static(path.resolve(__dirname, 'dist')));
+    app.get('*', (req, res, next) => {
+      if (req.path.startsWith('/api')) return next();
+      res.sendFile(path.resolve(__dirname, 'dist', 'index.html'));
     });
   }
 

@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { adminApi } from '../services/adminApi';
-import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { supabase } from '../lib/supabase';
 import type { UserRole } from '../types/admin';
 
 export interface AdminSessionUser {
@@ -19,7 +19,7 @@ interface AdminAuthContextValue {
   errorMessage: string | null;
   loginWithPassword: (email: string, password: string) => Promise<boolean>;
   loginWithMagicLink: (email: string) => Promise<{ success: boolean; message: string }>;
-  logout: () => void;
+  logout: () => Promise<void>;
   clearAccessDenied: () => void;
 }
 
@@ -32,41 +32,55 @@ export const AdminAuthProvider: React.FC<{ children: React.ReactNode }> = ({ chi
   const [isAccessDenied, setIsAccessDenied] = useState<boolean>(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
 
-  const verifySession = useCallback(async (sessionToken: string) => {
-    setIsLoading(true);
-    adminApi.setToken(sessionToken);
-
+  const verifyUserRbac = useCallback(async (sessionUser: any, sessionToken: string): Promise<boolean> => {
     try {
-      const result = await adminApi.verifyAuth();
-      if (result.authenticated && result.is_admin) {
-        setAdminUser({
-          id: result.user?.id,
-          email: result.user?.email,
-          display_name: result.user?.display_name || result.user?.email?.split('@')[0],
-          role: result.user?.role || 'admin',
-          is_admin: true,
-        });
-        setToken(sessionToken);
-        setIsAccessDenied(false);
-        setErrorMessage(null);
-      } else {
+      // Direct Authoritative Database-Level Admin Verification
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, email, is_admin, role, subscription_status')
+        .eq('id', sessionUser.id)
+        .single();
+
+      if (profileError || !profile) {
+        console.warn('[AdminAuth] Unable to verify user profile:', profileError?.message);
+        await supabase.auth.signOut().catch(() => {});
         setIsAccessDenied(true);
         setAdminUser(null);
         setToken(null);
         adminApi.setToken(null);
+        return false;
       }
-    } catch (err: any) {
-      console.warn('[AdminAuth] Verification check rejected:', err.message);
-      if (err.status === 403 || err.is_admin === false) {
+
+      // Strict RBAC Enforcement
+      if (!profile.is_admin || (profile.role !== 'admin' && profile.role !== 'super_admin')) {
+        console.warn('[AdminAuth] Access Denied: User is not an admin.');
+        await supabase.auth.signOut().catch(() => {});
         setIsAccessDenied(true);
-      } else {
-        setErrorMessage(err.message || 'Verification failed');
+        setAdminUser(null);
+        setToken(null);
+        adminApi.setToken(null);
+        return false;
       }
+
+      setAdminUser({
+        id: sessionUser.id,
+        email: profile.email || sessionUser.email,
+        display_name: (profile as any)?.display_name || sessionUser.user_metadata?.full_name || sessionUser.user_metadata?.name || sessionUser.email?.split('@')[0],
+        role: profile.role,
+        is_admin: true,
+      });
+      setToken(sessionToken);
+      adminApi.setToken(sessionToken);
+      setIsAccessDenied(false);
+      setErrorMessage(null);
+      return true;
+    } catch (err: any) {
+      console.error('[AdminAuth] RBAC verification exception:', err);
+      setIsAccessDenied(true);
       setAdminUser(null);
       setToken(null);
       adminApi.setToken(null);
-    } finally {
-      setIsLoading(false);
+      return false;
     }
   }, []);
 
@@ -75,51 +89,40 @@ export const AdminAuthProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     let mounted = true;
 
     async function initAuth() {
-      if (supabase) {
-        try {
-          const { data: { session } } = await supabase.auth.getSession();
-          if (session && mounted) {
-            await verifySession(session.access_token);
-            return;
-          }
-        } catch (e) {
-          console.error('[AdminAuth] Error retrieving Supabase session:', e);
+      try {
+        const { data: { session }, error } = await supabase.auth.getSession();
+        if (session && session.user && mounted) {
+          await verifyUserRbac(session.user, session.access_token);
         }
-      }
-
-      // Check saved token fallback
-      const savedToken = adminApi.getToken();
-      if (savedToken && mounted) {
-        await verifySession(savedToken);
-      } else if (mounted) {
-        setIsLoading(false);
+      } catch (e) {
+        console.error('[AdminAuth] Error retrieving Supabase session:', e);
+      } finally {
+        if (mounted) {
+          setIsLoading(false);
+        }
       }
     }
 
     initAuth();
 
     // Subscribe to real-time auth changes
-    let subscription: any = null;
-    if (supabase) {
-      const { data } = supabase.auth.onAuthStateChange(async (event, session) => {
-        if (event === 'SIGNED_IN' && session) {
-          await verifySession(session.access_token);
-        } else if (event === 'SIGNED_OUT') {
-          setAdminUser(null);
-          setToken(null);
-          adminApi.setToken(null);
-          setIsAccessDenied(false);
-          setIsLoading(false);
-        }
-      });
-      subscription = data.subscription;
-    }
+    const { data: { subscription } } = supabase.auth.onAuthStateChange(async (event, session) => {
+      if ((event === 'SIGNED_IN' || event === 'TOKEN_REFRESHED') && session?.user) {
+        await verifyUserRbac(session.user, session.access_token);
+      } else if (event === 'SIGNED_OUT') {
+        setAdminUser(null);
+        setToken(null);
+        adminApi.setToken(null);
+        setIsAccessDenied(false);
+        setIsLoading(false);
+      }
+    });
 
     return () => {
       mounted = false;
-      if (subscription) subscription.unsubscribe();
+      subscription?.unsubscribe();
     };
-  }, [verifySession]);
+  }, [verifyUserRbac]);
 
   const loginWithPassword = async (email: string, password: string): Promise<boolean> => {
     setIsLoading(true);
@@ -127,29 +130,52 @@ export const AdminAuthProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setIsAccessDenied(false);
 
     try {
-      // Primary: Route via relative /api/admin/auth/login to avoid unresolved client-side DNS domains
-      const result = await adminApi.loginWithPassword(email, password);
+      // 1. Direct Supabase Client Login
+      const { data: authData, error: authError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
 
-      if (result.authenticated && result.token) {
-        setToken(result.token);
-        adminApi.setToken(result.token);
-        setAdminUser({
-          id: result.user?.id,
-          email: result.user?.email,
-          display_name: result.user?.display_name || result.user?.email?.split('@')[0],
-          role: result.user?.role || 'admin',
-          is_admin: true,
-        });
-        setIsAccessDenied(false);
-        setErrorMessage(null);
-        setIsLoading(false);
-        return true;
+      if (authError || !authData.user) {
+        throw new Error(authError?.message || 'Invalid email or password');
       }
+
+      // 2. Authoritative Database-Level Admin Verification
+      const { data: profile, error: profileError } = await supabase
+        .from('profiles')
+        .select('id, email, is_admin, role, subscription_status')
+        .eq('id', authData.user.id)
+        .single();
+
+      if (profileError || !profile) {
+        await supabase.auth.signOut();
+        throw new Error('Unable to verify user profile in database.');
+      }
+
+      // 3. Strict RBAC Enforcement
+      if (!profile.is_admin || (profile.role !== 'admin' && profile.role !== 'super_admin')) {
+        await supabase.auth.signOut();
+        throw new Error('Access Denied: Administrative privileges required.');
+      }
+
+      // 4. Session State Update
+      const sessionToken = authData.session?.access_token || '';
+      adminApi.setToken(sessionToken);
+      setToken(sessionToken);
+      setAdminUser({
+        id: authData.user.id,
+        email: profile.email || authData.user.email || email,
+        display_name: (profile as any)?.display_name || authData.user.user_metadata?.full_name || authData.user.user_metadata?.name || email.split('@')[0],
+        role: profile.role,
+        is_admin: true,
+      });
+      setIsAccessDenied(false);
+      setErrorMessage(null);
       setIsLoading(false);
-      return false;
+      return true;
     } catch (err: any) {
-      console.warn('[AdminAuth] Login failed:', err.message);
-      if (err.status === 403 || err.is_admin === false) {
+      console.warn('[AdminAuth] Direct Supabase login failed:', err.message);
+      if (err.message?.includes('Access Denied')) {
         setIsAccessDenied(true);
       } else {
         setErrorMessage(err.message || 'Authentication failed. Please check your admin credentials.');
@@ -164,29 +190,33 @@ export const AdminAuthProvider: React.FC<{ children: React.ReactNode }> = ({ chi
     setErrorMessage(null);
 
     try {
-      // Route via relative /api/admin/auth/magic-link
-      const res = await adminApi.loginWithMagicLink(email);
+      const { error } = await supabase.auth.signInWithOtp({
+        email,
+        options: {
+          emailRedirectTo: window.location.origin,
+        },
+      });
+      if (error) throw error;
       setIsLoading(false);
-      return res;
+      return { success: true, message: `Magic sign-in link dispatched to ${email}. Please check your email inbox.` };
     } catch (err: any) {
       setIsLoading(false);
       return { success: false, message: err.message || 'Failed to dispatch magic link.' };
     }
   };
 
-  const logout = () => {
+  const logout = async () => {
     setAdminUser(null);
     setToken(null);
     adminApi.setToken(null);
     localStorage.removeItem('trelvix_admin_token');
-    if (supabase) {
-      supabase.auth.signOut().catch(() => {});
-    }
-    setAdminUser(null);
-    setToken(null);
-    adminApi.setToken(null);
     setIsAccessDenied(false);
     setErrorMessage(null);
+    try {
+      await supabase.auth.signOut();
+    } catch (err) {
+      console.warn('[AdminAuth] Error signing out of Supabase:', err);
+    }
   };
 
   const clearAccessDenied = () => {
